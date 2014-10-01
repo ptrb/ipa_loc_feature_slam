@@ -1,0 +1,4 @@
+<launch>
+  <node pkg="ipa_loc_feature_slam_development" type="ipa_loc_feature_slam_development" output="screen" name="valgrind" launch-prefix="valgrind --tool=callgrind --callgrind-out-file=/home/bp/callgrind.out" />
+</launch>
+
