@@ -45,11 +45,11 @@ SLAMPointObservation::SLAMPointObservation( const ipa_navigation_msgs::PointFeat
    MatrixXd cov_all = MatrixXd::Zero(2,2);
    cov_all << ipa_point.covariance[0], ipa_point.covariance[1],
    ipa_point.covariance[2], ipa_point.covariance[3];
-   cov_all = cov_all * 10;
+//    cov_all = cov_all * 10;
    cov_all = 0.5 * ( cov_all + cov_all.transpose() );
    
    cov_ = rot * cov_all * rot.transpose();
-   cov_ = cov_ * 10.0;
+   cov_ = cov_ * 20.0;
 }
 
 Vector2d SLAMPointObservation::getPoint() const
@@ -88,7 +88,6 @@ SLAMLineObservation::SLAMLineObservation( const ipa_navigation_msgs::LineFeature
    for( int i = 0 ; i < 4 ; i++ ){
       for( int j = 0 ; j < 4 ; j++ ){
 	 cov_all(i,j) = line.covariance[index];
-// 	 if( i == j ) cov_all(i,j) *= 1;
 	 index++;
       }     
    }
@@ -121,7 +120,7 @@ SLAMLineObservation::SLAMLineObservation( const ipa_navigation_msgs::LineFeature
    A(1,3) = - A(1,1);
    
    cov_ = A * cov_all * A.transpose() ;
-   cov_ = cov_ * 10.0;
+   cov_ = cov_ * 16.0;
 }
 
 Vector2d SLAMLineObservation::getEnd() const

@@ -43,7 +43,6 @@ protected:
    long existence_estimate_; //!< Increasing with each observation, decreasing if feature should have been seen.
    bool should_have_been_seen_; //!< True if that feature should have been seen from the current robot pose.
    Vector3d pose_; //!< The pose is sampled according to the associated observation and robot pose.
-   double last_observation_;
    VectorXd state_; //!< The Kalman-filter state of the feature.
    MatrixXd cov_; //!< The covariance matrix of the state.
    
@@ -75,7 +74,7 @@ public:
    virtual double merge( SLAMLandmark * ) = 0; //!< update this, merge with param object   
 
    // DP: Template method
-   double measureLikelihood( SLAMObservation * , Vector3d& , Matrix3d& ); 
+   double measureLikelihood( SLAMObservation* obs, Vector3d& pose_robot, Matrix3d& cov_odo ); 
    double updateKalman( SLAMObservation * , Vector3d& , double , Matrix3d& );  
    void refreshLandmarkForIteration( const Vector3d& );
    
@@ -90,11 +89,7 @@ public:
 
 class SLAMPointLandmark : public SLAMLandmark
 {
-public:
-   SLAMPointLandmark( SLAMPointObservation& , Vector3d , double );
-   SLAMPointLandmark( const SLAMPointLandmark& );
-   SLAMPointLandmark * getCopy();
-   
+private:
    void calculateJacobianPose( const Vector3d& );
    void calculateJacobianMap( const Vector3d& );
    void predictMeasurement( const Vector3d& );
@@ -103,23 +98,20 @@ public:
    double merge( SLAMLandmark * );
    void typeSpecializedUpdate( SLAMObservation* obs );
    void setObservationDifference( SLAMObservation * );
-   
+public:
+   SLAMPointLandmark( SLAMPointObservation& , Vector3d , double );
+   SLAMPointLandmark( const SLAMPointLandmark& );
+   SLAMPointLandmark * getCopy();  
    std::vector<geometry_msgs::Point> getVisualizationPoints();
 };
 
 class SLAMLineLandmark : public SLAMLandmark
 {
 private:
-   double x1_, x2_;
-   double y1_, y2_;
+   Vector2d p1_;
+   Vector2d p2_;
    bool facing_origin_;
    bool intersect_;
-   
-public:
-   SLAMLineLandmark( SLAMLineObservation& , Vector3d , double );
-   SLAMLineLandmark( const SLAMLineLandmark& );
-   SLAMLineLandmark * getCopy();
-   
    void calculateJacobianPose( const Vector3d& );
    void calculateJacobianMap( const Vector3d& );
    void predictMeasurement( const Vector3d& );
@@ -128,8 +120,12 @@ public:
    double merge( SLAMLandmark * );
    void typeSpecializedUpdate( SLAMObservation * );
    void setObservationDifference( SLAMObservation * );
-   double getFactor( SLAMObservation * );
-   
+   double getFactor( SLAMObservation * );   
+public:
+   SLAMLineLandmark( SLAMLineObservation& , Vector3d , double );
+   SLAMLineLandmark( const SLAMLineLandmark& );
+   SLAMLineLandmark * getCopy();
+
    Vector2d getStart() const;
    Vector2d getEnd() const;
    std::vector<geometry_msgs::Point> getVisualizationPoints();

@@ -11,9 +11,11 @@ static boost::mt19937 rng = boost::mt19937();
 tf::TransformListener * SLAMProcessor::tf_listener_; 
 double SLAMProcessor::latest_odo_pose_[3]; // Pose in /fast_slam frame
 tf::Stamped<tf::Pose> SLAMProcessor::tf_global_odo_transformation_; 
+Vector3d best_pose_ = Vector3d(0,0,0);
 
 SLAMProcessor::SLAMProcessor( tf::TransformListener * tf )
 {   
+   count_particles_ = 100;
    tf_listener_ = tf;
    init_ = false;
    v_weights_.assign(count_particles_ , 1.0);
@@ -25,7 +27,7 @@ SLAMProcessor::SLAMProcessor( tf::TransformListener * tf )
  * @param[out] odo_diff_out The resulting local odometry params: [0]:= x [1]:= y [2]:= orientation.
  * @param[in,out] tf_global_odo_transformation This is the last known pose in the global frame. Will be updated.
  */
-bool SLAMProcessor::getLocalOdom( const ros::Time& reference_instant , std::vector<double>& odo_diff_out , tf::Stamped<tf::Pose>& tf_global_odo_transformation ) const 
+bool SLAMProcessor::getLocalOdom( const ros::Time& reference_instant , Vector3d& odo_diff_out , tf::Stamped<tf::Pose>& tf_global_odo_transformation ) const 
 {
    double dx, dy, theta_old;
 
@@ -77,43 +79,27 @@ bool SLAMProcessor::getLocalOdom( const ros::Time& reference_instant , std::vect
  * @param[in,out] tf_global_odo_transformation This is the last known pose in the global frame. Will be updated.
  * @param[in,out] latest_odo_pose The position in the slam_map system: [0]:= x [1]:= y [2]:= orientation.
  */
-bool SLAMProcessor::deadReckoning( const ros::Time& reference_instant , std::vector<double>& odo_diff_out , tf::Stamped<tf::Pose>& tf_global_odo_transformation , double latest_odo_pose[3] ) const
+bool SLAMProcessor::deadReckoning( Vector3d& odom , double latest_odo_pose[3] ) const
 {
    double d_x, d_y, cos_v_o, sin_v_o;
    std::vector<double> new_pose_diff;
    new_pose_diff.resize(4);
-   if( getLocalOdom( reference_instant , new_pose_diff , tf_global_odo_transformation ) )
+   std::vector<std::vector<double> >::iterator it_odom;
+
+   cos_v_o = cos( latest_odo_pose[2] + odom[2] );
+   sin_v_o = sin( latest_odo_pose[2] + odom[2] );   
+   d_x = odom[0] * cos_v_o - odom[1] * sin_v_o;
+   d_y = odom[1] * cos_v_o + odom[0] * sin_v_o;
+   odom[0] = d_x;
+   odom[1] = d_y;   
+   if( !(fabs(odom[0]) < 0.0001 && fabs(odom[1]) < 0.0001 && fabs(odom[2]) < 0.0001) )
    {
-      cos_v_o = cos( latest_odo_pose[2] + new_pose_diff[2] );
-      sin_v_o = sin( latest_odo_pose[2] + new_pose_diff[2] );   
-      d_x = new_pose_diff[0] * cos_v_o - new_pose_diff[1] * sin_v_o;
-      d_y = new_pose_diff[1] * cos_v_o + new_pose_diff[0] * sin_v_o;
-      new_pose_diff[0] = d_x;
-      new_pose_diff[1] = d_y;
-      new_pose_diff[3] = latest_odo_pose[2] + new_pose_diff[2];
-      
-      if( fabs(new_pose_diff[0]) < 0.0001 && fabs(new_pose_diff[1]) < 0.0001 && fabs(new_pose_diff[2]) < 0.0001 )
-      {
-	 odo_diff_out[0] = 0.0;
-	 odo_diff_out[1] = 0.0;
-	 odo_diff_out[2] = 0.0;
-      }
-      else 
-      {
-	 odo_diff_out[0] = new_pose_diff[0];
-	 odo_diff_out[1] = new_pose_diff[1];
-	 odo_diff_out[2] = new_pose_diff[2];
-	 odo_diff_out[3] = new_pose_diff[3];
-	 latest_odo_pose[0] += d_x;
-	 latest_odo_pose[1] += d_y;
-	 latest_odo_pose[2] += new_pose_diff[2];
-	 latest_odo_pose[2] = latest_odo_pose[2] - std::floor( latest_odo_pose[2] / (2 * M_PI)) * 2 * M_PI;
-      }
-      return true;
+      latest_odo_pose[0] += d_x;
+      latest_odo_pose[1] += d_y;
+      latest_odo_pose[2] += odom[2];
+      latest_odo_pose[2] = latest_odo_pose[2] - std::floor( latest_odo_pose[2] / (2 * M_PI)) * 2 * M_PI;
    }
-   else {
-      return false;
-   }
+   return true;
 }
 
 /*!Get odometry in slam_map system.
@@ -122,154 +108,67 @@ bool SLAMProcessor::deadReckoning( const ros::Time& reference_instant , std::vec
 bool SLAMProcessor::update( SLAMConfig& config )
 {
    // Check if data is available
-   if( q_observations_.size() < 5 ) return false; 
+   if( q_input_data_.size() < 5 ) return false; 
 
    static int count; // Count of iterations until resampling
    count++;
    
-   SLAMData current_data = q_observations_.front();
+   SLAMSensorData current_data = q_input_data_.front();
    std::vector<SLAMParticle>::iterator it_particles;
+   double effective_sample_size = 0;
+   
+   ////////////////////////////////////////////////////////
    
    tf::Stamped<tf::Pose> tf_global_odo_transformation_tmp = tf_global_odo_transformation_;
-   double latest_odo_pose_tmp[3] = { latest_odo_pose_[0],latest_odo_pose_[1],latest_odo_pose_[2] };
    ros::Time instant;
    double timestep_duration = current_data.getTimestamp() - tf_global_odo_transformation_tmp.stamp_.toSec();
-   std::vector<std::vector<double> > v_odom;
-   bool success = true;
-   double nt = 0;
-   while( timestep_duration > 0.1 && success )
-   {
-      instant = instant.fromSec( tf_global_odo_transformation_tmp.stamp_.toSec() + 0.1 );
-      timestep_duration -= 0.1;
-      std::vector<double> odom;
-      odom.resize(4);
-      if( !deadReckoning( instant , odom , tf_global_odo_transformation_tmp , latest_odo_pose_tmp ) ) {
-	 success = false;
-	 break;
-      }
-      v_odom.push_back( odom );
-   }
-   
-   std::vector<double> odom;
-   odom.resize(4);
-   instant = instant.fromSec( current_data.getTimestamp() );
-   if( !deadReckoning( instant, odom , tf_global_odo_transformation_tmp , latest_odo_pose_tmp ) ) success = false;
-   if( success )
-   { 
-      v_odom.push_back( odom ); 
-//       ROS_INFO("new tf global stamp: %f\t last stamp: %f",tf_global_odo_transformation_tmp.stamp_.toSec(),tf_global_odo_transformation_.stamp_.toSec());     
-      tf_global_odo_transformation_ = tf_global_odo_transformation_tmp;
-      latest_odo_pose_[0] = latest_odo_pose_tmp[0];
-      latest_odo_pose_[1] = latest_odo_pose_tmp[1];
-      latest_odo_pose_[2] = latest_odo_pose_tmp[2];
+   last_processed_timestep_.fromSec(current_data.getTimestamp());
+   Vector3d odom = current_data.getOdom();
 
-      std::vector<std::vector<double> > v_weights_current_iteration;
+   deadReckoning( odom , latest_odo_pose_ );
+ 
+      std::vector<double> v_weights_current_iteration;
 
-      for( it_particles = v_particles_.begin() ; it_particles != v_particles_.end() ; ++it_particles ){
-	 // try odometry update. sample minimum rate 5Hz
-
-	    std::vector<std::vector<double> >::iterator it_odom;
-	    double odo_total[4] = {0,0,0,0};
-	    for( it_odom = v_odom.begin() ; it_odom != v_odom.end() ; ++it_odom ){
-	       double dom_arr[4] = { it_odom->at(0),it_odom->at(1),it_odom->at(2),it_odom->at(3) };
-	       it_particles->samplePose( dom_arr ); 
-	       it_particles->calcPose( dom_arr );
-	       odo_total[0] += dom_arr[0];
-	       odo_total[1] += dom_arr[1];
-	       odo_total[2] += dom_arr[2];
-	       odo_total[3] = dom_arr[3];
-	    }
-	    it_particles->setCovarianceOdo( odo_total );
-	 
-	 v_weights_current_iteration.push_back( it_particles->updateParticle( current_data , config ) );
-      }
-
-      std::vector<double> acc_weights_particle;
-      acc_weights_particle.assign( count_particles_ , 1.0 );
-      for( int i = 0 ; i < count_particles_ ; i++ )
+      for( it_particles = v_particles_.begin() ; it_particles != v_particles_.end() ; ++it_particles )
       {
-	 for( int j = 0 ; j < v_weights_current_iteration[i].size() ; j++ )
-	 {
-	    acc_weights_particle[i] *= v_weights_current_iteration[i][j];
-	    ROS_ERROR_COND( isnan(acc_weights_particle[i]) , "acc_weights_particle IS NAN");
-	    ROS_ERROR_COND( isinf(acc_weights_particle[i]) , "acc_weights_particle IS INF");
-	 }
+	 v_weights_current_iteration.push_back( it_particles->updateParticle( current_data , config ) );
       }
       
       // Normalize factors for this round
-      double acc_weights = std::accumulate( acc_weights_particle.begin() , acc_weights_particle.end() , 0.0 );
+      double acc_weights = std::accumulate( v_weights_current_iteration.begin() , v_weights_current_iteration.end() , 0.0 );
       
-      if( acc_weights <= 1e-40 ) {
-	 acc_weights = 1;
-      }
+      if( acc_weights <= 1e-40 ) acc_weights = 1.0;
       for( int i = 0 ; i < v_weights_.size() ; i++ )
       {
-	 v_weights_[i] *= ( acc_weights_particle[i] / acc_weights );
+	 v_weights_[i] *= ( v_weights_current_iteration[i] / acc_weights );
       }
-      
       acc_weights = std::accumulate( v_weights_.begin() , v_weights_.end() , 0.0 );
-      if( acc_weights <= 1e-40 ) {
-	 acc_weights = 1;
-      }
-      
+      if( acc_weights <= 1e-40 ) acc_weights = 1.0;
       for( int i = 0 ; i < v_weights_.size() ; i++ )
       {
-	 v_weights_[i] = ( v_weights_[i] / acc_weights ) * count;
-	 nt += v_weights_[i] * v_weights_[i];
+	 v_weights_[i] = ( v_weights_[i] / acc_weights );
+	 effective_sample_size += v_weights_[i] * v_weights_[i];
 	 ROS_ERROR_COND( isnan(v_weights_[i]) , "v_weights is NAN. Greetings from SLAMProcessor's update function." );
 	 ROS_ERROR_COND( isinf(v_weights_[i]) , "v_weights is INF. Greetings from SLAMProcessor's update function." );
       }
-   }
-   else {
-      ROS_INFO("DEADRECKONING not possible.");
-   }
 
    static int best_map_index = 0;   
    
-   if( nt != 0){
-      if( (count*count / nt) < ((double)count_particles_ / (double)2)){
-	 
-	 resampleParticles( v_weights_ );
+   if( effective_sample_size != 0){
+      if( (1.0 / effective_sample_size) < ( config.threshold_effective_sample_size ) ){
+	 resampleParticles( v_weights_ , config );
 	 best_map_index = updateBestMap( config );
+         ROS_INFO("Resample with count %d",count);
 	 count = 0;
 	 v_weights_.assign(count_particles_, 1.0);  
 	 
-// 	 Vector3d pose_error = true_pose_ - v_particles_[best_map_index].getPose();
-// 	 if( pose_error(2) < - M_PI ) pose_error(2) += (M_PI * 2);
-// 	 if( pose_error(2) > M_PI ) pose_error(2) -= (M_PI * 2);
-// 	 ROS_INFO_STREAM("Pose error is:" << pose_error);
-// 	 
-// 	 // app = append, ate = position to end, trunc = delete everything
-// 	 std::ofstream file("pose_error.txt", std::ios::app);
-// 	 file << pose_error(0)<<"\t"<<pose_error(1)<<"\t"<<pose_error(2)<<std::endl;
-// 	 file.close();
-	 
       }
    }
-//    else {
-//       trackBestMap( best_map_index );
-//    }
-//    ROS_INFO("Timestamp data: %f\ttrue pose: %f",tsa.toSec(),true_pose_stamp_.toSec());
-//    ROS_INFO_STREAM("TRUE Pose:"<<true_pose_);
-//    ROS_INFO_STREAM("EST Pose:"<< v_particles_[best_map_index].getPose());
-   q_observations_.pop();
+   best_pose_ = v_particles_[best_map_index].getPose();
+   
+   q_input_data_.pop();
      
    return true;
-}
-
-void SLAMProcessor::trackBestMap( int index ){
- 
-   best_slam_map_.markers.clear();
-   
-   ros::Time ref_time = ros::Time::now();
-   std::vector<visualization_msgs::Marker> v_markers = v_particles_[index].getFeatureMarkers( ref_time );
-   std::vector<visualization_msgs::Marker>::iterator it;
-   int i = 0;
-   for( it = v_markers.begin() ; it != v_markers.end() ; ++it ){
-      best_slam_map_.markers.push_back( *it );
-      best_slam_map_.markers[i].id = i;
-      i++;
-   }
 }
 
 int SLAMProcessor::updateBestMap( SLAMConfig& config ){
@@ -285,7 +184,7 @@ int SLAMProcessor::updateBestMap( SLAMConfig& config ){
    best_slam_map_.markers.clear();
    
    ros::Time ref_time = ros::Time::now();
-   std::vector<visualization_msgs::Marker> v_markers = v_particles_[best_index].getFeatureMarkers( ref_time );
+   std::vector<visualization_msgs::Marker> v_markers = v_particles_[best_index].getFeatureMarkers( ref_time , config );
    std::vector<visualization_msgs::Marker>::iterator it;
    int i = 0;
    for( it = v_markers.begin() ; it != v_markers.end() ; ++it ){
@@ -306,7 +205,7 @@ int SLAMProcessor::updateBestMap( SLAMConfig& config ){
    return best_index;
 }
 
-inline void SLAMProcessor::resampleParticles( std::vector<double> v_weights ){
+inline void SLAMProcessor::resampleParticles( std::vector<double> v_weights , SLAMConfig& config ){
    // normalize weights.
    std::vector<SLAMParticle> new_particles;
    std::vector<double>::iterator it;
@@ -327,33 +226,24 @@ inline void SLAMProcessor::resampleParticles( std::vector<double> v_weights ){
    }  
 
    boost::uniform_real<double> dist(0, 1);
-   
+   boost::uniform_int<int> dist_int(0, count_particles_-1);
    double random;
    
-   int count [count_particles_] = {}; // Debug
+   std::vector<int> count;
+   count.assign( v_particles_.size() , 0.0 );
    
-//    for( int i = 0 ; i < count_particles_ ; i++ ){
-//       random = dist(rng);
-//       int index;
-//       // find index
-//       for( int j = 0 ; j < v_acc.size() ; j++ ){
-// 	 if( v_acc[j] >= random ) { 
-// 	    index = j;
-//             count[index]++; //Debug
-// 	    break;
-// 	 }
-//       }
-//       new_particles.push_back( v_particles_[index] );
-//    }
    random = dist(rng);
    double uk;
    for( int i = 0 ; i < count_particles_ ; i++ ){
       uk = ( i + dist(rng) ) / count_particles_;
-      int index;
+      int index = 0;
       // find index
       for( int j = 0 ; j < v_acc.size() ; j++ ){
 	 if( v_acc[j] >= uk ) { 
-	    index = j;
+            if( count[j] > config.max_particle_copies ) {
+               index = dist_int(rng);
+            }
+	    else index = j;
             count[index]++; //Debug
 	    break;
 	 }
@@ -366,7 +256,6 @@ inline void SLAMProcessor::resampleParticles( std::vector<double> v_weights ){
       for( int u = 0 ; u < count[j] ; u++ ) {
 	 stars += "*";
       }
-//       ROS_INFO("old particle[%d]   %s\t\tfeatures: %d\tcandidates: %d",j,stars.c_str(),v_particles_[j].getLandmarkCount(),v_particles_[j].getCandidateCount() );
    }
    
    v_particles_.clear();
@@ -375,14 +264,13 @@ inline void SLAMProcessor::resampleParticles( std::vector<double> v_weights ){
       v_particles_.push_back( new_particles[i] );
    }
    
-//    ROS_INFO("End resample\n");
    return;
    
 }
 
 
 
-void SLAMProcessor::pushNewData( const ipa_navigation_msgs::FeatureList::ConstPtr& msg_featr )
+void SLAMProcessor::pushNewData( const ipa_navigation_msgs::FeatureList::ConstPtr& msg_featr , SLAMConfig& config )
 {
    // initialize frame transformation and related timestamp as well as particles, so that they have coordinates 0,0,0 
    // right at that timestamp.
@@ -400,23 +288,31 @@ void SLAMProcessor::pushNewData( const ipa_navigation_msgs::FeatureList::ConstPt
 	       latest_odo_pose_[1] = 0.0;
 	       latest_odo_pose_[2] = 0.0;
 	       init_ = true;
-	       ROS_INFO("Initialization was successfull!");
+               v_weights_.assign(count_particles_ , 1.0);
+	       ROS_INFO("Initialization was successfull! Created %ld particles. You can not change this number via dynamic reconfigure", v_particles_.size() );
 	       
 	 }
       delete error_msg;
       return;
    }
    try {
-      if( !q_observations_.empty() && fabs(q_observations_.back().getTimestamp() - msg_featr->header.stamp.toSec()) < 0.005 ) q_observations_.back().pushObservations(msg_featr , tf_listener_);
-      else {
-	 SLAMData new_data( msg_featr , tf_listener_ );
-	 if( new_data.getObservations().size() != 0 );
-	 q_observations_.push( new_data );
-      }
       
+         tf::Stamped<tf::Pose> tf_global_odo_transformation_tmp = tf_global_odo_transformation_;
+         bool success = true;
+
+         Vector3d odom = Vector3d::Zero();
+         if( !getLocalOdom( msg_featr->header.stamp, odom , tf_global_odo_transformation_tmp  ) ) success = false;
+         if( success )
+         { 
+            SLAMSensorData new_data( msg_featr , tf_listener_ , odom , config );
+            if( new_data.getObservations().size() != 0 ){
+               tf_global_odo_transformation_ = tf_global_odo_transformation_tmp;
+               q_input_data_.push( new_data );
+            }
+         }      
    }
    catch( int n ){   
-      if(n == 13) ROS_INFO("Catched exception following impossible transform. Elements: %d", q_observations_.size());
+      if(n == 13) ROS_INFO("Catched exception following impossible transform. Elements: %ld", q_input_data_.size());
    }
 }
 
@@ -436,7 +332,7 @@ tf::StampedTransform SLAMProcessor::getSlamMapTransform(){
    tf::Quaternion q;
    q.setRPY(0,0, -angle);
    transform.setRotation( q );
-   return tf::StampedTransform(transform, tf_global_odo_transformation_.stamp_, "/base_link", "/slam_map");
+   return tf::StampedTransform(transform, last_processed_timestep_, "/base_link", "/slam_map");   
 }
 
 visualization_msgs::Marker SLAMProcessor::getParticleMarkers() const
@@ -463,12 +359,12 @@ visualization_msgs::Marker SLAMProcessor::getParticleMarkers() const
    return new_marker;
 }
 
-visualization_msgs::MarkerArray SLAMProcessor::getFeatureMarkers()
+visualization_msgs::MarkerArray SLAMProcessor::getFeatureMarkers( SLAMConfig& config  )
 {
    visualization_msgs::MarkerArray new_markers;
    ros::Time ref_time = ros::Time::now();
    for( int i = 0 ; i < v_particles_.size() ; i++ ){
-      std::vector<visualization_msgs::Marker> markers = v_particles_[i].getFeatureMarkers( ref_time );
+      std::vector<visualization_msgs::Marker> markers = v_particles_[i].getFeatureMarkers( ref_time , config );
       markers[0].id = i;
       markers[1].id = i + count_particles_;
       if( !markers[0].points.empty() ) new_markers.markers.push_back( markers[0] );
@@ -477,12 +373,12 @@ visualization_msgs::MarkerArray SLAMProcessor::getFeatureMarkers()
    return new_markers;
 }
 
-visualization_msgs::MarkerArray SLAMProcessor::getFeatureMarkersCandidates()
+visualization_msgs::MarkerArray SLAMProcessor::getFeatureMarkersCandidates(SLAMConfig& config )
 {
    visualization_msgs::MarkerArray new_markers;
    ros::Time ref_time = ros::Time::now();
    for( int i = 0 ; i < v_particles_.size() ; i++ ){
-      std::vector<visualization_msgs::Marker> markers = v_particles_[i].getFeatureMarkersCandidates( ref_time );
+      std::vector<visualization_msgs::Marker> markers = v_particles_[i].getFeatureMarkersCandidates( ref_time , config );
       markers[0].id = i;
       markers[1].id = i + count_particles_;
       if( !markers[0].points.empty() ) new_markers.markers.push_back( markers[0] );
@@ -507,7 +403,27 @@ geometry_msgs::PoseStamped SLAMProcessor::visualizePoseFromOdometry(){
    out_visualize_pose.pose.orientation.z = q.z();
    out_visualize_pose.pose.orientation.w = q.w();
    out_visualize_pose.header.frame_id="/slam_map";
-   out_visualize_pose.header.stamp = tf_global_odo_transformation_.stamp_;
+   out_visualize_pose.header.stamp = last_processed_timestep_;
+   return out_visualize_pose;
+}
+
+geometry_msgs::PoseStamped SLAMProcessor::visualizeBestPose(){        
+   geometry_msgs::PoseStamped out_visualize_pose;
+   out_visualize_pose.pose.position.x = best_pose_[0];
+   out_visualize_pose.pose.position.y = best_pose_[1];
+   out_visualize_pose.pose.position.z = 0;
+   Vector3d zaxis;
+   zaxis = Vector3d::Zero();
+   zaxis(2) += 1;
+   AngleAxis<double> aa(best_pose_[2], zaxis);
+   Quaternion<double> q(aa);
+
+   out_visualize_pose.pose.orientation.x = q.x();
+   out_visualize_pose.pose.orientation.y = q.y();
+   out_visualize_pose.pose.orientation.z = q.z();
+   out_visualize_pose.pose.orientation.w = q.w();
+   out_visualize_pose.header.frame_id="/slam_map";
+   out_visualize_pose.header.stamp = last_processed_timestep_;
    return out_visualize_pose;
 }
 
@@ -515,3 +431,10 @@ void SLAMProcessor::configure(SLAMConfig& config )
 {
 
 }
+
+bool SLAMProcessor::getInitStatus(SLAMConfig& config )
+{
+   count_particles_ = config.particle_count;
+   return init_;
+}
+

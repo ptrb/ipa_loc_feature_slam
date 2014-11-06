@@ -42,23 +42,27 @@ using namespace Eigen;
 // IPA LOC FEATURE SLAM
 
 #include "slam_observation.h"
+#include "slam_config.h"
 
 /*! \brief SLAMData contains one or more observation and a timestamp reference.
  * 
  */
-class SLAMData
+class SLAMSensorData
 {
    private:
       std::vector<SLAMObservation *> v_observations_; //!< All observations for this instance, which can be of different types.  
       double timestamp_; //!< The timestamp will serve to determine odometry parameters.
+      Vector3d odom_;
+      Matrix3d cov_odom_;
    public:
-      SLAMData( const ipa_navigation_msgs::FeatureList::ConstPtr& , tf::TransformListener * );
-      ~SLAMData();
-      SLAMData( const SLAMData& );
-      void pushObservations( const ipa_navigation_msgs::FeatureList::ConstPtr& , tf::TransformListener * );
+      SLAMSensorData( const ipa_navigation_msgs::FeatureList::ConstPtr& , tf::TransformListener * , Vector3d& , SLAMConfig& );
+      ~SLAMSensorData();
+      SLAMSensorData( const SLAMSensorData& );
       std::vector<SLAMObservation *> getObservations() const; //!< Get all observations, as vector of Pointers.
       
       double getTimestamp(){ return timestamp_; }; //!< Get the timestamp.
+      Vector3d getOdom(){ return odom_; }
+      Matrix3d getOdomCovar() { return cov_odom_; }
       
       int sensor;
 };

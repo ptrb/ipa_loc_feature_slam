@@ -136,6 +136,9 @@ inline bool linesOverlap( const double& threshold , const Vector2d& start_1 , co
 	 }
 	 Vector2d projected = projectPointOnLine( start,end,point );
 	 double overlap = (projected - start).norm();
+         double line_length = (end-start).norm();
+         double remain = (projected - end).norm();
+         if( remain > line_length ) return false;
 	 if( overlap > 0.5 || overlap >= length_1*0.9 || overlap >= length_2*0.9  ) {
 	    return true;
 	 }
@@ -207,7 +210,6 @@ double SLAMLandmark::measureLikelihood( SLAMObservation* obs, Vector3d& pose_rob
    Matrix3d cholesky = mean_pose_variance_.llt().matrixL();   
    // Cholesky 
    pose_ = mean_pose_ + cholesky * getRandomVector(); 
-//    pose_(2) = normalizePi( pose_(2) );
    
    predictMeasurement( pose_ );
    setObservationDifference( obs );
@@ -216,7 +218,7 @@ double SLAMLandmark::measureLikelihood( SLAMObservation* obs, Vector3d& pose_rob
    
    Matrix<double, 1, 1> mahalonobis_distance = z_diff_.transpose() * meas_cov_q_.inverse() * z_diff_;
 
-   double weight = 1/(sqrt(fabs((2*M_PI*meas_cov_q_).determinant()))) * exp( -0.5 * mahalonobis_distance(0,0) ); 
+   double weight = 1/(2*M_PI*sqrt(fabs((meas_cov_q_).determinant()))) * exp( -0.5 * mahalonobis_distance(0,0) ); 
    ROS_ERROR_COND( isnan(weight) , "Landmark::measureLikelihood returns NAN");
    return weight;
 }
@@ -239,7 +241,7 @@ double SLAMLandmark::updateKalman( SLAMObservation * obs , Vector3d& mean_pose ,
    Matrix2d L;
    L.noalias() = jacobian_pose_ * proposal_cov * jacobian_pose_.transpose() + jacobian_map_*cov_old*jacobian_map_.transpose()+obs->getCovar();
    Matrix<double, 1, 1> mahalonobis_distance = z_diff_.transpose() * L.inverse() * z_diff_;
-   double weight = 1/(sqrt(fabs((2*M_PI*L).determinant()))) * exp( -0.5 * mahalonobis_distance(0,0) );
+   double weight = 1/(2*M_PI*sqrt(fabs((L).determinant()))) * exp( -0.5 * mahalonobis_distance(0,0) );
    if( weight < 1e-14 ) {
       if( dynamic_cast<SLAMPointObservation *>(obs) ){
 	 ROS_INFO("POINT");
@@ -259,8 +261,6 @@ double SLAMLandmark::updateKalman( SLAMObservation * obs , Vector3d& mean_pose ,
       ROS_INFO_STREAM("L determinant: "<< L.determinant() );
       ROS_INFO_STREAM("cov old: "<<cov_old);
    }
-//       w = (1 + (timestamp - last_observation_)*100) * w;
-//       last_observation_ = timestamp;
    
    existence_estimate_++;
    proposal_cov = mean_pose_variance_;
@@ -284,7 +284,6 @@ SLAMPointLandmark::SLAMPointLandmark( SLAMPointObservation& o1 , Vector3d pose_r
    cov_.noalias() = H_inverse * o1.getCovar() * H_inverse.transpose();
 
    existence_estimate_ = 5;  
-   last_observation_ = timestamp;
 }
 
 void SLAMPointLandmark::calculateJacobianMap( const Vector3d& pose_robot )
@@ -391,18 +390,7 @@ void SLAMLineLandmark::calculateJacobianPose(const Vector3d& pose_robot )
 }
 
 void SLAMLineLandmark::predictMeasurement(const Vector3d& pose_robot )
-{ 
-//       intersect_ = false;
-//       double alpha = state_(1) - normalizePi( atan2( pose_robot(1) , pose_robot(0) ) );
-//       if( alpha < - M_PI ) alpha += (M_PI * 2);
-//       if( alpha > M_PI ) alpha -= (M_PI * 2);
-//       
-//       if( fabs(alpha) < ( M_PI / 2 ) ){
-// 	 double a = state_(0) / cos(alpha);
-// 	 double origin_r = sqrt( pose_robot(0)*pose_robot(0) + pose_robot(1)*pose_robot(1) );
-// 	 if( fabs( a ) < origin_r ) intersect_ = true;
-//       }
-//       
+{   
       prediction_(0) = fabs( state_(0) - pose_robot(0)*cos(state_(1)) - pose_robot(1)*sin(state_(1)) );      
       if( intersect_ ){
 	 prediction_(1) = normalizePi( state_(1) - normalizePi( pose_robot(2) ) - M_PI );
@@ -417,34 +405,19 @@ bool SLAMLineLandmark::shouldExamine( SLAMObservation* obs , const Vector3d& pos
    SLAMLineObservation * line_obs = dynamic_cast<SLAMLineObservation *>( obs );
    if( line_obs )
    {  
-//       intersect_ = false;
-//       double alpha = state_(1) - normalizePi( atan2( pose_robot(1) , pose_robot(0) ) );
-//       if( alpha < - M_PI ) alpha += (M_PI * 2);
-//       else if( alpha > M_PI ) alpha -= (M_PI * 2);
-//       
-//       if( fabs(alpha) < ( M_PI / 2 ) ){
-// 
-// 	 double a = state_(0) / cos(alpha);
-// 	 double origin_r = sqrt( pose_robot(0)*pose_robot(0) + pose_robot(1)*pose_robot(1) );
-// 	 if( fabs( a ) < origin_r ) intersect_ = true;
-//       }
       // Line was only seen from other side
       if( intersect_ == facing_origin_ ) return false;
       
       // Check for overlap
       Vector2d start = line_obs->getStart();
       Vector2d end = line_obs->getEnd();
-      Vector2d start_global, end_global, state_start, state_end;
+      Vector2d start_global, end_global;
 
       start_global = transformPointLocalToGlobal( start[0] , start[1] , pose_robot );
-      end_global = transformPointLocalToGlobal( end[0] , end[1] , pose_robot );
-      state_start(0) = x1_;
-      state_start(1) = y1_;
-      state_end(0) = x2_;
-      state_end(1) = y2_;    
+      end_global = transformPointLocalToGlobal( end[0] , end[1] , pose_robot );  
       
-      if( linesIntersect( state_start , state_end , start_global , end_global ) ) return true;
-      if( linesOverlap( 0.2 , state_start , state_end , start_global , end_global ) ) return true;
+      if( linesIntersect( p1_ , p2_ , start_global , end_global ) ) return true;
+      if( linesOverlap( 0.2 , p1_ , p2_ , start_global , end_global ) ) return true;
       return false;
    }
    else return false;
@@ -460,15 +433,10 @@ SLAMLineLandmark::SLAMLineLandmark( SLAMLineObservation& obs , Vector3d pose_rob
    
    Vector2d point_begin, point_end, roh_theta;
 
-   point_begin = transformPointLocalToGlobal( obs.getStart()[0] , obs.getStart()[1] , pose_robot );
-   point_end = transformPointLocalToGlobal( obs.getEnd()[0] , obs.getEnd()[1] , pose_robot );
+   p1_ = transformPointLocalToGlobal( obs.getStart()[0] , obs.getStart()[1] , pose_robot );
+   p2_ = transformPointLocalToGlobal( obs.getEnd()[0] , obs.getEnd()[1] , pose_robot );
    
-   state_ = linePointsToRohTheta( point_begin(0) , point_begin(1) , point_end(0) , point_end(1) );
-
-   x1_ = point_begin(0);
-   y1_ = point_begin(1);
-   x2_ = point_end(0);
-   y2_ = point_end(1);
+   state_ = linePointsToRohTheta( p1_(0) , p1_(1) , p2_(0) , p2_(1) );
 
    intersect_ = false;
    double alpha = state_(1) - normalizePi( atan2( pose_robot(1) , pose_robot(0) ) );
@@ -486,7 +454,6 @@ SLAMLineLandmark::SLAMLineLandmark( SLAMLineObservation& obs , Vector3d pose_rob
       
    cov_.noalias() = H_inverse * obs.getCovar() * H_inverse.transpose();
    existence_estimate_ = 1;    
-   last_observation_ = timestamp;
 }
 
 void SLAMLineLandmark::typeSpecializedUpdate( SLAMObservation * obs )
@@ -516,10 +483,8 @@ void SLAMLineLandmark::typeSpecializedUpdate( SLAMObservation * obs )
    line_start[1] = state_(0) / sin( state_(1) );
    line_end[0] = state_(0) / cos( state_(1) );
    line_end[1] = 0;
-   point_candidates[0][0] = x1_;
-   point_candidates[0][1] = y1_;
-   point_candidates[1][0] = x2_;
-   point_candidates[1][1] = y2_;
+   point_candidates[0] = p1_;
+   point_candidates[1] = p2_;
    point_candidates[2] = transformPointLocalToGlobal( start[0] , start[1] , pose_ );
    point_candidates[3] = transformPointLocalToGlobal( end[0] , end[1] , pose_ );
 
@@ -544,11 +509,8 @@ void SLAMLineLandmark::typeSpecializedUpdate( SLAMObservation * obs )
 	 index_max_dist_start = i;
       }
    }
-   x1_ = point_candidates[index_max_dist_origin][0];
-   y1_ = point_candidates[index_max_dist_origin][1];
-   
-   x2_ = point_candidates[index_max_dist_start][0];
-   y2_ = point_candidates[index_max_dist_start][1];   
+   p1_ = point_candidates[index_max_dist_origin];
+   p2_ = point_candidates[index_max_dist_start];
 }
 
 void SLAMLineLandmark::setObservationDifference( SLAMObservation * obs )
@@ -568,7 +530,7 @@ double SLAMLineLandmark::getFactor(SLAMObservation* obs )
       Vector2d end = line_obs->getEnd();
       double length_state, length_observation;
       length_observation = (end-start).norm();
-      length_state = (Vector2d(x2_,y2_)-Vector2d(x1_,y1_)).norm();
+      length_state = (p2_ - p1_).norm();
       double factor = length_observation / length_state;
       if( factor > 1.0 ) factor = 1.0;
       return factor;
@@ -587,18 +549,12 @@ double SLAMLandmark::decreaseExistenceEstimate()
 
 Vector2d SLAMLineLandmark::getEnd() const
 {
-   Vector2d ret;
-   ret(0) = x2_;
-   ret(1) = y2_;
-   return ret;
+   return p2_;
 }
 
 Vector2d SLAMLineLandmark::getStart() const
 {
-   Vector2d ret;
-   ret(0) = x1_;
-   ret(1) = y1_;
-   return ret;
+   return p1_;
 }
 
 SLAMLandmark::SLAMLandmark() 
@@ -612,7 +568,6 @@ SLAMLandmark::SLAMLandmark( const SLAMLandmark& feature )
    should_have_been_seen_ = feature.should_have_been_seen_;
    existence_estimate_ = feature.existence_estimate_;   
    pose_ = feature.pose_;
-   last_observation_ = feature.last_observation_;
    
    state_ = feature.state_;
    cov_ = feature.cov_;
@@ -636,10 +591,8 @@ SLAMPointLandmark* SLAMPointLandmark::getCopy()
 
 SLAMLineLandmark::SLAMLineLandmark(const SLAMLineLandmark& feature ) : SLAMLandmark( feature )
 {
-   x1_ = feature.x1_;
-   x2_ = feature.x2_;
-   y1_ = feature.y1_;
-   y2_ = feature.y2_;
+   p1_ = feature.p1_;
+   p2_ = feature.p2_;
    intersect_ = feature.intersect_;
    facing_origin_ = feature.facing_origin_;
    
@@ -707,19 +660,10 @@ bool SLAMLineLandmark::shouldMerge(SLAMLandmark* other_in)
    {  
       
       bool examine = false;
-      if( facing_origin_ != other->facing_origin_ ) return false;
-      Vector2d start_1,end_1,start_2,end_2;
-      start_1(0) = x1_;
-      start_1(1) = y1_;
-      end_1(0) = x2_;
-      end_1(1) = y2_;
-      start_2(0) = other->x1_;
-      start_2(1) = other->y1_;
-      end_2(0) = other->x2_;
-      end_2(1) = other->y2_;      
+      if( facing_origin_ != other->facing_origin_ ) return false;  
       
-      if( linesIntersect( start_1 , end_1 , start_2 , end_2 ) ) examine = true;
-      if( linesOverlap( 0.2 , start_1 , end_1 , start_2 , end_2 ) ) examine = true;
+      if( linesIntersect( p1_ , p2_ , other->p1_ , other->p2_ ) ) examine = true;
+      if( linesOverlap( 0.04 , p1_ , p2_ , other->p1_ , other->p2_ ) ) examine = true;
 
       if( !examine ) return false;
 	
@@ -730,11 +674,9 @@ bool SLAMLineLandmark::shouldMerge(SLAMLandmark* other_in)
 	 const Matrix2d cov_mean_ = (cov_ + other->cov_) * 0.5;
 	 double mahalonobis_distance = diff.transpose() * cov_mean_.inverse() * diff;
 	 if( fabs(state_(0) - other->state_(0)) < 0.1 && fabs(diff_theta) < 0.1 ) { 
-//  	    ROS_INFO("merge with mahalonobis_distance of: %f",mahalonobis_distance);
 	    return true;
 	 }
 	 else return false;
-// 	 if( mahalonobis_distance < 10.0 ) return true;
    }
    return false;
 }
@@ -745,7 +687,6 @@ double SLAMLineLandmark::merge(SLAMLandmark* other_in)
    double w = 1.0;
    if( other )
    {  
-      // Niemeier S.61
       cov_(0,0) = 0.25 * (cov_(0,0)+other->cov_(0,0));
       cov_(0,1) = 0.25 * (cov_(0,1)+other->cov_(0,1));
       cov_(1,0) = 0.25 * (cov_(1,0)+other->cov_(1,0));
@@ -764,8 +705,8 @@ double SLAMLineLandmark::merge(SLAMLandmark* other_in)
 	 cov_(1,0) *= sqrt(2); 
       }      
       double length1, length2;
-      length1 = (Vector2d(x1_,y1_)-Vector2d(x2_,y2_)).norm();
-      length2 = (Vector2d(other->x1_,other->y1_)-Vector2d(other->x2_,other->y2_)).norm();
+      length1 = ( p2_-p1_ ).norm();
+      length2 = (other->p2_ -other->p1_).norm();
       
       double diff_theta = state_(1) - other->state_(1);
       if( diff_theta < - M_PI ) diff_theta += (M_PI * 2);
@@ -773,33 +714,25 @@ double SLAMLineLandmark::merge(SLAMLandmark* other_in)
       const Vector2d diff( state_(0) - other->state_(0) , diff_theta );
       const Matrix2d cov_mean_ = (cov_ + other->cov_) * 0.5;
       double mahalonobis_distance = diff.transpose() * cov_mean_.inverse() * diff;
-      w = 1/(sqrt(fabs((2*M_PI*cov_).determinant()))) * exp( -0.5 * mahalonobis_distance );
-//       ROS_INFO("w is:\t%f",w);
-      
+      w = 1/(2*M_PI*sqrt(fabs((cov_).determinant()))) * exp( -0.5 * mahalonobis_distance );      
       
       int test = other->getExistenceEstimate();
       Vector2d point_candidates[4];
-      point_candidates[0][0] = x1_;
-      point_candidates[0][1] = y1_;
-      point_candidates[1][0] = x2_;
-      point_candidates[1][1] = y2_;
-      point_candidates[2][0] = other->x1_;
-      point_candidates[2][1] = other->y1_;
-      point_candidates[3][0] = other->x2_;
-      point_candidates[3][1] = other->y2_;
+      point_candidates[0] = p1_;
+      point_candidates[1] = p2_;
+      point_candidates[2] = other->p1_;
+      point_candidates[3] = other->p2_;
 
       double sin_sum,cos_sum;
       sin_sum = sin(state_(1)) * length1 + sin(other->state_(1)) * length2;
       cos_sum = cos(state_(1)) * length1 + cos(other->state_(1)) * length2;
 
-//       roh_ = (roh_ + other->roh_) * 0.5;
       state_(0) = (state_(0) * length1 + other->state_(0) * length2) / ( length1 + length2 );
       state_(1) = atan2( sin_sum , cos_sum );
       state_(1) = normalizePi( state_(1) );
 
       // Update end points
       Vector2d line_start, line_end;
-      
       
       line_start[0] = 0;
       line_start[1] = state_(0) / sin( state_(1) );
@@ -827,13 +760,9 @@ double SLAMLineLandmark::merge(SLAMLandmark* other_in)
 	    index_max_dist_start = i;
 	 }
       }
-      x1_ = point_candidates[index_max_dist_origin][0];
-      y1_ = point_candidates[index_max_dist_origin][1];
+      p1_ = point_candidates[index_max_dist_origin];
+      p2_ = point_candidates[index_max_dist_start];
       
-      x2_ = point_candidates[index_max_dist_start][0];
-      y2_ = point_candidates[index_max_dist_start][1]; 
-      
-//       w *= ( Vector2d( x2_-x1_ , y2_-y1_ ).norm() / 5);
    }
    return w;
 }
@@ -843,11 +772,11 @@ std::vector<geometry_msgs::Point> SLAMLineLandmark::getVisualizationPoints()
    std::vector<geometry_msgs::Point> ret;
    geometry_msgs::Point new_point_start;
    geometry_msgs::Point new_point_end;
-   new_point_start.x = x1_;
-   new_point_start.y = y1_;
+   new_point_start.x = p1_(0);
+   new_point_start.y = p1_(1);
    new_point_start.z = 0;
-   new_point_end.x = x2_;
-   new_point_end.y = y2_;
+   new_point_end.x = p2_(0);
+   new_point_end.y = p2_(1);
    new_point_end.z = 0;
    ret.push_back( new_point_start );
    ret.push_back( new_point_end );

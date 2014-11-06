@@ -48,7 +48,6 @@ SLAMParticle::SLAMParticle( const Vector3d& pose )
 SLAMParticle::SLAMParticle( const SLAMParticle & old ) {
    try {
       v_landmarks_.reserve( old.v_landmarks_.size() );
-      v_landmark_candidates_.reserve( old.v_landmark_candidates_.size() );
    }
    catch( std::length_error ) {
       ROS_ERROR("Failed to reserve memory for landmarks during particle copying");
@@ -57,9 +56,6 @@ SLAMParticle::SLAMParticle( const SLAMParticle & old ) {
       v_landmarks_.push_back( old.v_landmarks_[i]->getCopy() );
    }   
 
-   for( int i = 0 ; i < old.v_landmark_candidates_.size() ; i++ ){
-      v_landmark_candidates_.push_back( old.v_landmark_candidates_[i]->getCopy() );
-   }   
 
    pose_ = old.pose_;
    sampled_pose_ = old.sampled_pose_;
@@ -73,12 +69,9 @@ SLAMParticle::~SLAMParticle()
    for( it = v_landmarks_.begin() ; it != v_landmarks_.end() ; ++it ){
       delete *it;
    }
-   for( it = v_landmark_candidates_.begin() ; it != v_landmark_candidates_.end() ; ++it ){
-      delete *it;
-   }  
 }
 
-void SLAMParticle::samplePose( double odo[4] )
+void SLAMParticle::samplePose( Vector3d& odo )
 {
    double delta1[3];
    double delta2[3];
@@ -86,18 +79,22 @@ void SLAMParticle::samplePose( double odo[4] )
    double dx, dy;
    double a1, a2, a3, a4;
 
-   a1 = 0.0002;
-   a2 = 0.0002;
+//    a1 = 0.0002;
+//    a2 = 0.0002;
+//    a3 = 0.00015;
+//    a4 = 0.00015;
+   a1 = 0.002;
+   a2 = 0.002;
    a3 = 0.00015;
-   a4 = 0.00015;
-   dx = odo[0];
-   dy = odo[1];
+   a4 = 0.00015;   
+   dx = odo(0);
+   dy = odo(1);
    
-   if( fabs(dx) < 0.0001 && fabs(dy) < 0.0001 && fabs(odo[3]) < 0.00001 ) return;
+   if( fabs(dx) < 0.0001 && fabs(dy) < 0.0001 && fabs(odo[2]) < 0.00001 ) return;
    
-   delta1[0] = atan2( dy , dx ) - (odo[3]-odo[2]) ;
+   delta1[0] = atan2( dy , dx ) - (pose_[2]) ;
    delta1[1] = sqrt( dx*dx + dy*dy );
-   delta1[2] = odo[2] - delta1[0];
+   delta1[2] = calculated_pose_[2] - pose_[2]  - delta1[0];
    delta2[0] = delta1[0] - normRandom(0, a1*fabs(delta1[0])+a2*delta1[1]);
    delta2[1] = delta1[1] - normRandom(0, a3*delta1[1]+a4*( fabs(delta1[0]) + fabs(delta1[2]) ));
    delta2[2] = delta1[2] - normRandom(0, a1*fabs(delta1[2])+a2*delta1[1]);
@@ -108,19 +105,21 @@ void SLAMParticle::samplePose( double odo[4] )
    sampled_pose_(0) = ret[0];
    sampled_pose_(1) = ret[1];
    sampled_pose_(2) = ret[2];
+   sampled_pose_[2] = sampled_pose_[2] - std::floor( sampled_pose_[2] / (2 * M_PI)) * 2 * M_PI;
 }
 
-void SLAMParticle::calcPose( double odo[4] )
+void SLAMParticle::calcPose( Vector3d& odo )
 {
-   if( fabs(odo[0]) < 0.0001 && fabs(odo[1]) < 0.0001 && fabs(odo[3]) < 0.00001 ) return;
-   double cos_v_o, sin_v_o, s, angle; 
-   angle = calculated_pose_[2] + atan2( odo[1], odo[0] ) - (odo[3]-odo[2]);
-   cos_v_o = cos( angle );
-   sin_v_o = sin( angle );   
-   s = sqrt( odo[0]*odo[0] + odo[1]*odo[1] );
-   calculated_pose_(0) += s * cos_v_o;
-   calculated_pose_(1) += s * sin_v_o;
-   calculated_pose_(2) += odo[2];
+   if( fabs(odo[0]) < 0.0001 && fabs(odo[1]) < 0.0001 && fabs(odo[2]) < 0.00001 ) return;
+   double cos_v_o, sin_v_o, d_x, d_y; 
+   calculated_pose_[2] = calculated_pose_[2] + odo[2];
+   calculated_pose_[2] = calculated_pose_[2] - std::floor( calculated_pose_[2] / (2 * M_PI)) * 2 * M_PI;
+   cos_v_o = cos( calculated_pose_[2] );
+   sin_v_o = sin( calculated_pose_[2] );   
+   d_x = odo[0] * cos_v_o - odo[1] * sin_v_o;
+   d_y = odo[1] * cos_v_o + odo[0] * sin_v_o;
+   calculated_pose_(0) += d_x;
+   calculated_pose_(1) += d_y;  
 }
 
 Vector3d SLAMParticle::getPose() const
@@ -128,9 +127,24 @@ Vector3d SLAMParticle::getPose() const
    return pose_;
 }
 
-std::vector<double> SLAMParticle::updateParticle( SLAMData data_uz , SLAMConfig& config )
+// odom in slam_map for this particle
+void SLAMParticle::setCovarianceOdo( SLAMSensorData& sensor_data ) {
+      Matrix3d rot;
+      rot << cos(calculated_pose_[2]), -sin(calculated_pose_[2]), 0,  // /base_link to /slam_map
+      sin(calculated_pose_[2]), cos(calculated_pose_[2]), 0,
+      0 , 0, 1;
+      covariance_odo_ = rot * sensor_data.getOdomCovar() * rot.transpose();
+      ROS_ERROR_COND( covariance_odo_.determinant() == 0 , "cov odo with det = 0");
+}
+
+double SLAMParticle::updateParticle( SLAMSensorData sensor_data , SLAMConfig& config )
 {
-   std::vector<SLAMObservation *> v_obs = data_uz.getObservations();
+   Vector3d odom = sensor_data.getOdom();
+   calcPose( odom ); 
+   samplePose( odom );     
+   setCovarianceOdo( sensor_data );
+   
+   std::vector<SLAMObservation *> v_obs = sensor_data.getObservations();
    std::vector<SLAMObservation *>::iterator it_obs;
    std::vector<SLAMLandmark *>::iterator it_land;
    std::vector<SLAMLandmark *>::iterator it_land_cand;
@@ -138,18 +152,12 @@ std::vector<double> SLAMParticle::updateParticle( SLAMData data_uz , SLAMConfig&
    
    // multimap matches stores weights, landmarks and observations for reobserved landmarks. Sorted by weights.
    std::multimap< double , std::pair<SLAMLandmark * , SLAMObservation *> > mm_matches;
-//    std::vector<SLAMLandmark *> found_match;
-//    std::vector<SLAMObservation *> found_match_observation;
    std::vector<SLAMObservation *> no_match_observation;   
    
    for ( it_land = v_landmarks_.begin() ; it_land != v_landmarks_.end() ; ++it_land ){
       (*it_land)->refreshLandmarkForIteration( calculated_pose_ );
       
-// 	 l_map.pushElement( local_points , *it_land );
    }
-   for ( it_land_cand = v_landmark_candidates_.begin() ; it_land_cand != v_landmark_candidates_.end() ; ++it_land_cand ){
-      (*it_land_cand)->refreshLandmarkForIteration( calculated_pose_ );
-   }   
    
    // Phase 1
    // Try to associate each observation with an existing feature. Separate observations
@@ -170,15 +178,7 @@ std::vector<double> SLAMParticle::updateParticle( SLAMData data_uz , SLAMConfig&
       for ( it_land = v_landmarks_.begin() ; it_land != v_landmarks_.end() ; ++it_land ){
 	 std::vector<point2d> local_points;
 	 v_weights.push_back( (*it_land)->measureLikelihood( *it_obs , calculated_pose_ , covariance_odo_ ) );
-// 	 l_map.pushElement( local_points , *it_land );
       }
-      for ( it_land_cand = v_landmark_candidates_.begin() ; it_land_cand != v_landmark_candidates_.end() ; ++it_land_cand ){
-	 std::vector<point2d> local_points;
-	 
-	 v_weights_cand.push_back( (*it_land_cand)->measureLikelihood( *it_obs , calculated_pose_ , covariance_odo_ ) );
-// 	 l_map.pushElement( local_points , *it_land_cand );
-      }
-//      l_map.setVisibilities( data_uz.sensor );
       // Determine max likelihood -> value and index
       for( int j = 0 ; j < v_weights.size() ; j++ ){
 	    if( max_w < v_weights[j] ){
@@ -193,26 +193,13 @@ std::vector<double> SLAMParticle::updateParticle( SLAMData data_uz , SLAMConfig&
 	    }
       }
       // Max w below threshold? Add new feature.
-      if( max_w < config.data_association_threshold_new_feature 
-	 && max_w_cand < config.data_association_threshold_new_feature ) 
+      if( max_w < config.data_association_threshold_new_feature  ) 
       { 
-	 landmark_index_cand = v_landmark_candidates_.size();
+	 landmark_index = v_landmarks_.size();
 	 no_match_observation.push_back( *it_obs );
       }
       else {
-	 if( max_w > max_w_cand ) 
-	 {
-// 	    found_match.push_back( v_landmarks_.at(landmark_index) );
-// 	    found_match_observation.push_back( *it_obs );
-	    mm_matches.insert( std::make_pair( max_w , std::make_pair( v_landmarks_.at(landmark_index) , *it_obs ) ) );
-	 }
-	 else 
-	 {
-// 	    found_match.push_back( v_landmark_candidates_.at(landmark_index_cand) );
-// 	    found_match_observation.push_back( *it_obs );
-	    
-	    mm_matches.insert( std::make_pair( max_w_cand , std::make_pair(v_landmark_candidates_.at(landmark_index_cand) , *it_obs ) ) );
-	 }
+         mm_matches.insert( std::make_pair( max_w , std::make_pair( v_landmarks_.at(landmark_index) , *it_obs ) ) );
       }
       
       // Update existance-estimate for all other features
@@ -237,26 +224,7 @@ std::vector<double> SLAMParticle::updateParticle( SLAMData data_uz , SLAMConfig&
 	 if( !erased ) ++it_land;
       }
       
-      for( it_land_cand = v_landmark_candidates_.begin() ; it_land_cand != v_landmark_candidates_.end() ; ){
-	 bool erased = false;
-	 if( landmark_index_cand != it_land_cand - v_landmark_candidates_.begin() ) {
-	    bool observable = (*it_land_cand)->shouldHaveBeenSeen( pose_ );
-	    if( observable ){ // feature should have been seen
-
-// 	       ROS_INFO("SHOULD HAVE BEEN SEEN");
-	       double estimate = (*it_land_cand)->decreaseExistenceEstimate();
-	       if(estimate < 0) {
-		  delete *it_land_cand;
-		  it_land_cand = v_landmark_candidates_.erase( it_land_cand );
-		  erased = true;
-		  ROS_INFO("E R A S E D");
-		  --landmark_index_cand;
-	       }
-	    }
-	 }
-	 if( !erased ) ++it_land_cand;
-      }
-      // repeat for next observati1on...
+      // repeat for next observation...
    }
    
    // Phase 2
@@ -267,14 +235,14 @@ std::vector<double> SLAMParticle::updateParticle( SLAMData data_uz , SLAMConfig&
    std::multimap< double , std::pair< SLAMLandmark*,SLAMObservation* > >::reverse_iterator map_rev_itr;
    double weight, weight_sum = 0;
    int debug_cntr = 0;
+   
+  
    for( map_rev_itr = mm_matches.rbegin() ; map_rev_itr != mm_matches.rend() ; ++map_rev_itr ){
       debug_cntr++;
-//        mm_matches.lower_bound( map_itr->first );
-//       ROS_INFO("w was:\t%f",map_rev_itr->first);
       SLAMLandmark * landmark = map_rev_itr->second.first;
       SLAMObservation * observation = map_rev_itr->second.second;
       Vector3d old_pose = landmark->getPose();
-      weight = landmark->updateKalman( observation , proposal_mean , data_uz.getTimestamp() , proposal_cov );
+      weight = landmark->updateKalman( observation , proposal_mean , sensor_data.getTimestamp() , proposal_cov );
 //       ROS_INFO("w is:\t%f",weight);
       if( weight < 1e-14 ){
 	 ROS_INFO("debug_cntr: %d",debug_cntr);
@@ -288,8 +256,6 @@ std::vector<double> SLAMParticle::updateParticle( SLAMData data_uz , SLAMConfig&
 	 ROS_INFO_STREAM("landmark:: "<< landmark->getVisualizationPoints()[0] );
       }
       max_w_all_obs.push_back( weight );   
-//       landmark->setMeanPose( proposal_mean );
-//       landmark->setMeanPoseVariance( proposal_cov );
       new_pose += weight * landmark->getPose();
       weight_sum += weight;
    }
@@ -297,21 +263,19 @@ std::vector<double> SLAMParticle::updateParticle( SLAMData data_uz , SLAMConfig&
    
    if( max_w_all_obs.empty() ){ // No match
       for( int i = 0 ; i < no_match_observation.size() ; i++){
-	 max_w_all_obs.push_back( 4 );
+	 max_w_all_obs.push_back( 0.1 );
 	 if( (no_match_observation[i])->suitableInitObs() ){
-// 	    ROS_INFO("Add feature - w_max: %f\tw_max_cand: %f", max_w, max_w_cand);
-	    v_landmark_candidates_.push_back( (no_match_observation[i])->createFeature( sampled_pose_ , data_uz.getTimestamp()  ) ); 
+	    v_landmarks_.push_back( (no_match_observation[i])->createFeature( sampled_pose_ , sensor_data.getTimestamp()  ) ); 
 	 }
       }
       new_pose = sampled_pose_;
    }
    else { 
       new_pose = new_pose / weight_sum;
-//       new_pose = (*(found_match.end()-1))->getPose();
       for( int i = 0 ; i < no_match_observation.size() ; i++){
-	 max_w_all_obs.push_back( 4 );
+	 max_w_all_obs.push_back( 0.1 );
 	 if( (no_match_observation[i])->suitableInitObs() ){
-	    v_landmark_candidates_.push_back( (no_match_observation[i])->createFeature( new_pose , data_uz.getTimestamp() ) );
+	    v_landmarks_.push_back( (no_match_observation[i])->createFeature( new_pose , sensor_data.getTimestamp() ) );
 	 }
       }
    }   
@@ -321,9 +285,14 @@ std::vector<double> SLAMParticle::updateParticle( SLAMData data_uz , SLAMConfig&
    if( new_pose(2) > M_PI ) new_pose(2) -= 2*M_PI;
    setPose( new_pose );
 //    mergeSimultaneousCandidates();
-   max_w_all_obs.push_back( pickCandidates( config ) ); // weight
    max_w_all_obs.push_back( mergeSimultaneousFeatures() ); // weight
-   return max_w_all_obs;
+   
+   double weight_return = 1.0;
+   for( int i = 0 ; i < max_w_all_obs.size() ; i++ ){
+      weight_return = weight_return * max_w_all_obs[i];
+   }
+   
+   return weight_return;
 }
 
 long int SLAMParticle::getLandmarkCount()
@@ -331,40 +300,11 @@ long int SLAMParticle::getLandmarkCount()
    return v_landmarks_.size();
 }
 
-
-
-double SLAMParticle::pickCandidates( SLAMConfig& config )
-{
-   std::vector<SLAMLandmark *>::iterator it, it_cand;
-   double ret = 1.0;
-   for( it_cand = v_landmark_candidates_.begin() ; it_cand != v_landmark_candidates_.end() ; ){
-      if( (*it_cand)->getExistenceEstimate() > config.min_existence_estimate_map_feature ){ // Trust this feature and add or merge it to map.
-
-	 bool is_done = false;
-	 for( it = v_landmarks_.begin() ; it != v_landmarks_.end() ; ++it ){
-	    if( (*it)->shouldMerge( *it_cand ) ) {
-	       ret *= (*it)->merge( *it_cand );
-	       is_done = true;
-	       break;
-	    }
-	 }  
-	 if( !is_done ) v_landmarks_.push_back( (*it_cand)->getCopy() );
-	 delete *it_cand;
-	 it_cand = v_landmark_candidates_.erase( it_cand );
-      }
-      else {
-	 ++it_cand;
-      }
-   }   
-   return ret;
-}
-
 double SLAMParticle::mergeSimultaneousFeatures()
 {
    std::vector<SLAMLandmark *>::iterator it_out, it_in;
    double ret = 1.0;
    if( v_landmarks_.empty() ) return ret;
-//    int i = 0;
    for( it_out = v_landmarks_.begin() ; it_out <= v_landmarks_.end()-1 ; ++it_out ){
 
 	 for( it_in = it_out+1 ; it_in != v_landmarks_.end() ; ){
@@ -379,60 +319,9 @@ double SLAMParticle::mergeSimultaneousFeatures()
 	 }  
    }
    return ret;
-//    ROS_INFO("compared %d pairs",i);
 }
 
-void SLAMParticle::mergeSimultaneousCandidates()
-{
-   std::vector<SLAMLandmark *>::iterator it_out, it_in;
-   if( v_landmark_candidates_.empty() ) return;  // it_out != v_landmark_candidates_.end()-1
-   for( it_out = v_landmark_candidates_.begin() ; it_out <= v_landmark_candidates_.end()-1 ; ++it_out ){
-	 
-// 	 ROS_INFO(" it_in is: %p ",it_in);
-	 for( it_in = it_out+1 ; it_in != v_landmark_candidates_.end() ; ){
-	    if( (*it_out)->shouldMerge( *it_in ) ) {
-	       (*it_out)->merge( *it_in );
-// 	       ROS_INFO("merged simultaneous features");
-	       delete *it_in;
-	       it_in = v_landmark_candidates_.erase( it_in ); 
-	    }
-	    else {
-	       ++it_in;
-	    }
-	 }  
-   }   
-}
-
-void SLAMParticle::setCovarianceOdo( double odo[4] ) {
-      Matrix<double, 3, 3> covariance_odo = Matrix3d::Zero(); // cov in global frame
-      double odo_x, odo_y, odo_o;
-      if( odo[0] == 0 && odo[1] == 0 && odo[2] == 0 )
-      {
-	 odo_x = 1e-8;
-	 odo_y = 1e-8;
-	 odo_o = 1e-8;
-      }
-      else
-      {
-	 odo_x = odo[0];
-	 odo_y = odo[1];
-	 odo_o = odo[2];
-      }
-//       covariance_odo(0,0) = fabs(0.005 * odo_x);
-//       covariance_odo(1,1) = fabs(0.005 * odo_y);
-//       covariance_odo(2,2) = fabs(0.009 * odo_o);
-      covariance_odo(0,0) = fabs(0.01 * odo_x);
-      covariance_odo(1,1) = fabs(0.01 * odo_y);
-      covariance_odo(2,2) = fabs(0.009 * odo_o);
-      Matrix3d rot;
-      rot << cos(-odo[3]), -sin(-odo[3]), 0,  // /slam_map to /base_link
-      sin(-odo[3]), cos(-odo[3]), 0,
-      0 , 0, 1;
-      covariance_odo_ = rot * covariance_odo * rot.transpose();
-      ROS_ERROR_COND( covariance_odo_.determinant() == 0 , "cov odo with det = 0");
-}
-
-std::vector<visualization_msgs::Marker> SLAMParticle::getFeatureMarkers( ros::Time& ref_time )
+std::vector<visualization_msgs::Marker> SLAMParticle::getFeatureMarkers( ros::Time& ref_time , SLAMConfig& config )
 {
    visualization_msgs::Marker new_marker;
    static double seed;
@@ -462,11 +351,13 @@ std::vector<visualization_msgs::Marker> SLAMParticle::getFeatureMarkers( ros::Ti
    new_marker_line.color.b = 0.90;
    
    for( int i = 0 ; i < v_landmarks_.size() ; i++ ){
-      std::vector<geometry_msgs::Point> geom = v_landmarks_[i]->getVisualizationPoints();
-      if( geom.size() == 1 ) new_marker.points.push_back( geom[0] );  
-      else if( geom.size() == 2 ){
-	 new_marker_line.points.push_back( geom[0] );
-	 new_marker_line.points.push_back( geom[1] );
+      if( v_landmarks_[i]->getExistenceEstimate() > config.min_existence_estimate_map_feature ){
+         std::vector<geometry_msgs::Point> geom = v_landmarks_[i]->getVisualizationPoints();
+         if( geom.size() == 1 ) new_marker.points.push_back( geom[0] );  
+         else if( geom.size() == 2 ){
+            new_marker_line.points.push_back( geom[0] );
+            new_marker_line.points.push_back( geom[1] );
+         }
       }
    }   
    std::vector<visualization_msgs::Marker> ret;
@@ -475,7 +366,7 @@ std::vector<visualization_msgs::Marker> SLAMParticle::getFeatureMarkers( ros::Ti
    return ret;
 }
 
-std::vector<visualization_msgs::Marker> SLAMParticle::getFeatureMarkersCandidates( ros::Time& ref_time )
+std::vector<visualization_msgs::Marker> SLAMParticle::getFeatureMarkersCandidates( ros::Time& ref_time , SLAMConfig& config )
 {
    visualization_msgs::Marker new_marker;
    static double seed;
@@ -504,12 +395,14 @@ std::vector<visualization_msgs::Marker> SLAMParticle::getFeatureMarkersCandidate
    new_marker_line.color.g = 0.91;
    new_marker_line.color.b = 0.90;
    
-   for( int i = 0 ; i < v_landmark_candidates_.size() ; i++ ){
-      std::vector<geometry_msgs::Point> geom = v_landmark_candidates_[i]->getVisualizationPoints();
-      if( geom.size() == 1 ) new_marker.points.push_back( geom[0] );  
-      else if( geom.size() == 2 ){
-	 new_marker_line.points.push_back( geom[0] );
-	 new_marker_line.points.push_back( geom[1] );
+   for( int i = 0 ; i < v_landmarks_.size() ; i++ ){
+      if( v_landmarks_[i]->getExistenceEstimate() <= config.min_existence_estimate_map_feature ){
+         std::vector<geometry_msgs::Point> geom = v_landmarks_[i]->getVisualizationPoints();
+         if( geom.size() == 1 ) new_marker.points.push_back( geom[0] );  
+         else if( geom.size() == 2 ){
+            new_marker_line.points.push_back( geom[0] );
+            new_marker_line.points.push_back( geom[1] );
+         }
       }
    }   
    std::vector<visualization_msgs::Marker> ret;

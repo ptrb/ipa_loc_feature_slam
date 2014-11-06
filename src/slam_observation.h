@@ -59,7 +59,6 @@ private:
 public:
    SLAMPointObservation( const ipa_navigation_msgs::PointFeature& , const std_msgs::Header& , tf::TransformListener * );
    SLAMPointObservation( const SLAMPointObservation& old );
-//    ~SLAMPointObservation() { cov_.resize(0,0); }
    SLAMLandmark * createFeature( Vector3d , double );
    Vector2d getPoint() const;
    SLAMPointObservation * getCopy();
@@ -74,7 +73,6 @@ private:
 public:
    SLAMLineObservation( const ipa_navigation_msgs::LineFeature& , const std_msgs::Header& , tf::TransformListener * );
    SLAMLineObservation( const SLAMLineObservation& old );
-//    ~SLAMLineObservation() { cov_.resize(0,0); }
    SLAMLandmark * createFeature( Vector3d , double );
    bool suitableInitObs();
    Vector2d getStart() const;
